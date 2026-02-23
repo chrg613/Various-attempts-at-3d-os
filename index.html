@@ -1,182 +1,293 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-    <title>3D Holographic OS v1.1</title>
-    <style>
-        body { margin: 0; overflow: hidden; background: #000; color: white; font-family: 'Segoe UI', sans-serif; }
-        #webcam { position: absolute; width: 160px; height: 120px; bottom: 20px; right: 20px; border-radius: 12px; border: 2px solid rgba(255,255,255,0.2); transform: scaleX(-1); background: #222; z-index: 10; }
-        #ui-overlay { position: absolute; top: 30px; left: 30px; pointer-events: none; text-shadow: 0 2px 10px rgba(0,0,0,0.8); z-index: 10; }
-        .status { color: #00ffaa; font-weight: bold; }
-    </style>
+<meta charset="UTF-8">
+<title>3D Holographic Cyber-OS v2.0</title>
+<style>
+  body { margin:0; overflow:hidden; background:#000; font-family: 'Courier New', monospace; color:#00ffea; }
+  #ui-overlay {
+    position: absolute; top: 20px; left: 30px; pointer-events: none; z-index: 20;
+    text-shadow: 0 0 10px #00ffea, 0 0 20px #ff00ff;
+  }
+  #status { color: #ff00ff; font-weight: bold; }
+  #hint {
+    position: fixed; bottom: 20px; left: 20px; z-index: 20; opacity: 0.7;
+    font-size: 0.9rem; text-shadow: 0 0 8px #00ffea;
+  }
+  #webcam {
+    position: absolute; bottom: 20px; right: 20px; width: 180px; height: 135px;
+    border: 2px solid rgba(0,255,234,0.4); border-radius: 10px;
+    transform: scaleX(-1); box-shadow: 0 0 20px #00ffea;
+    z-index: 15; background:#111;
+  }
+</style>
 </head>
 <body>
-    <div id="ui-overlay">
-        <h1>Holographic OS v1.1</h1>
-        <p>Status: <span id="status-text" class="status">Initializing AI...</span></p>
-    </div>
-    <video id="webcam" autoplay playsinline></video>
+<div id="ui-overlay">
+  <h1>Holographic Cyber-OS v2.0</h1>
+  <p>Status: <span id="status">Booting neural link...</span></p>
+</div>
 
-    <script type="importmap">
-    {
-        "imports": {
-            "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
-            "@mediapipe/tasks-vision": "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.17/vision_bundle.mjs"
-        }
+<video id="webcam" autoplay playsinline muted></video>
+<div id="hint">Head tracking active • Mouse fallback • Drag windows • Lean to zoom central hologram</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js?module",
+    "@mediapipe/tasks-vision": "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.17/vision_bundle.mjs"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { FaceDetector, FilesetResolver } from "@mediapipe/tasks-vision";
+
+// ─── CONFIG ────────────────────────────────────────
+const SENSITIVITY_X   = 24;
+const SENSITIVITY_Y   = 15;
+const SMOOTHING       = 0.11;
+const ZOOM_STRENGTH   = 18;
+const DRAG_SENSITIVITY = 0.008;
+
+let faceDetector, lastVideoTime = -1;
+let headX = 0.5, headY = 0.5, faceScale = 0.25;
+let smoothHeadX = 0.5, smoothHeadY = 0.5, smoothZoom = 0;
+
+let mx = 0, my = 0;           // mouse fallback
+let selectedWindow = null;
+
+const video  = document.getElementById('webcam');
+const status = document.getElementById('status');
+
+// ─── THREE.JS SETUP ────────────────────────────────
+const scene    = new THREE.Scene();
+scene.fog      = new THREE.FogExp2(0x0a0015, 0.028);
+
+const camera   = new THREE.PerspectiveCamera(65, innerWidth/innerHeight, 0.1, 100);
+camera.position.set(0, 1.2, 9);
+
+const renderer = new THREE.WebGLRenderer({antialias:true, powerPreference:"high-performance"});
+renderer.setSize(innerWidth, innerHeight);
+renderer.setPixelRatio(devicePixelRatio);
+document.body.appendChild(renderer.domElement);
+
+// ─── LIGHTING + ATMOSPHERE ─────────────────────────
+scene.add(new THREE.AmbientLight(0x4040ff, 0.4));
+
+const neonPink  = new THREE.PointLight(0xff00ff, 400, 35); neonPink.position.set(-8, 6, 6); scene.add(neonPink);
+const neonCyan  = new THREE.PointLight(0x00ffff, 380, 32); neonCyan.position.set( 8, 4, 5); scene.add(neonCyan);
+const keyLight  = new THREE.PointLight(0xffffff, 600, 40); keyLight.position.set(0,12,8);   scene.add(keyLight);
+
+// ─── ROOM + GRID ───────────────────────────────────
+const room = new THREE.Mesh(
+  new THREE.BoxGeometry(80,60,80),
+  new THREE.MeshStandardMaterial({color:0x0a001a, side:THREE.BackSide})
+);
+scene.add(room);
+
+const grid = new THREE.GridHelper(100, 40, 0x00ffea, 0x1a0033);
+grid.position.y = -10; scene.add(grid);
+
+// ─── PARTICLES (floating cyber dust) ───────────────
+const particlesGeo = new THREE.BufferGeometry();
+const pos = new Float32Array(1800*3);
+for(let i=0;i<pos.length;i+=3){
+  pos[i  ] = (Math.random()-0.5)*60;
+  pos[i+1] = (Math.random()-0.5)*40;
+  pos[i+2] = (Math.random()-0.5)*50;
+}
+particlesGeo.setAttribute('position', new THREE.BufferAttribute(pos,3));
+const particles = new THREE.Points(
+  particlesGeo,
+  new THREE.PointsMaterial({color:0x88ffff, size:0.08, transparent:true, opacity:0.6})
+);
+scene.add(particles);
+
+// ─── HOLOGRAPHIC WINDOW CREATOR ────────────────────
+const loader = new THREE.TextureLoader();
+
+function createHoloWindow(x, y, z, texSrc = null, isMain = false) {
+  const geo = new THREE.PlaneGeometry(isMain ? 7.2 : 4.8, isMain ? 4.05 : 2.7);
+
+  let mat;
+  if (texSrc instanceof THREE.Texture) {
+    // live video/screen texture
+    mat = new THREE.MeshBasicMaterial({
+      map: texSrc,
+      side: THREE.DoubleSide,
+      transparent: true,
+      opacity: 0.92
+    });
+  } else {
+    // fallback image or colored
+    const tex = texSrc ? loader.load(texSrc) : null;
+    mat = new THREE.MeshPhysicalMaterial({
+      map: tex,
+      color: 0xffffff,
+      emissive: 0x00aaff,
+      emissiveIntensity: isMain ? 0.4 : 0.25,
+      transmission: 0.35,
+      roughness: 0.08,
+      metalness: 0.15,
+      clearcoat: 0.9,
+      clearcoatRoughness: 0.1,
+      side: THREE.DoubleSide
+    });
+  }
+
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.position.set(x, y, z);
+  mesh.rotation.y = isMain ? 0 : (x < 0 ? 0.28 : -0.28);
+  mesh.userData = { initialZ: z, isMain, baseScale: 1 };
+  mesh.isWindow = true;
+  scene.add(mesh);
+  return mesh;
+}
+
+// Windows
+const mainWindow = createHoloWindow(0, 0.8, -4.5, null, true);
+const leftWindow  = createHoloWindow(-7, 1.2, -8, 'https://threejs.org/examples/textures/758px-Canestra_di_frutta_(Caravaggio).jpg');
+const rightWindow = createHoloWindow( 7, 1.0, -8, 'https://threejs.org/examples/textures/uv_grid_opengl.jpg');
+
+// ─── LIVE SCREEN CAPTURE on main ───────────────────
+async function attachLiveScreen() {
+  try {
+    const stream = await navigator.mediaDevices.getDisplayMedia({video:true});
+    const vid = document.createElement('video');
+    vid.srcObject = stream;
+    vid.muted = true;
+    vid.play();
+    const tex = new THREE.VideoTexture(vid);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    mainWindow.material.map = tex;
+    mainWindow.material.needsUpdate = true;
+    status.textContent = "Neural & Desktop Linked ⚡";
+  } catch(e) {
+    status.textContent = "Screen access denied";
+    console.warn(e);
+  }
+}
+attachLiveScreen();
+
+// ─── FACE TRACKING (MediaPipe) ─────────────────────
+async function setupCamera() {
+  const stream = await navigator.mediaDevices.getUserMedia({video:{width:640,height:480}});
+  video.srcObject = stream;
+  return new Promise(r => video.onloadedmetadata = () => r(video));
+}
+
+async function initFaceDetector() {
+  try {
+    const vision = await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.17/wasm");
+    faceDetector = await FaceDetector.createFromOptions(vision, {
+      baseOptions: {
+        modelAssetPath: "https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/1/blaze_face_short_range.tflite",
+        delegate: "GPU"
+      },
+      runningMode: "VIDEO"
+    });
+    status.textContent = "Hologram Synced ✓";
+  } catch(e) {
+    status.textContent = "Face AI offline";
+  }
+}
+
+function updateHeadTracking() {
+  if (!faceDetector || video.readyState < 2) return;
+  if (video.currentTime === lastVideoTime) return;
+  lastVideoTime = video.currentTime;
+
+  const now = performance.now();
+  const result = faceDetector.detectForVideo(video, now);
+  if (result.detections?.length > 0) {
+    const d = result.detections[0];
+    headX = 1 - d.keypoints[2].x;     // nose ≈ center
+    headY = d.keypoints[2].y;
+    faceScale = d.boundingBox.width;
+  }
+}
+
+// ─── MOUSE as fallback / additional control ────────
+window.addEventListener('mousemove', e => {
+  mx = (e.clientX/innerWidth - 0.5) * 2;
+  my = (e.clientY/innerHeight - 0.5) * 2;
+});
+
+// ─── WINDOW DRAGGING ───────────────────────────────
+const raycaster = new THREE.Raycaster();
+const pointer   = new THREE.Vector2();
+const dragPlane = new THREE.Plane(new THREE.Vector3(0,0,1), 5);
+
+window.addEventListener('mousedown', e => {
+  pointer.x = (e.clientX/innerWidth)*2 -1;
+  pointer.y = -(e.clientY/innerHeight)*2 +1;
+  raycaster.setFromCamera(pointer, camera);
+  const intersects = raycaster.intersectObjects(scene.children.filter(c=>c.isWindow));
+  if (intersects.length) selectedWindow = intersects[0].object;
+});
+
+window.addEventListener('mousemove', e => {
+  if (!selectedWindow) return;
+  pointer.x = (e.clientX/innerWidth)*2 -1;
+  pointer.y = -(e.clientY/innerHeight)*2 +1;
+  raycaster.setFromCamera(pointer, camera);
+  const pt = new THREE.Vector3();
+  if (raycaster.ray.intersectPlane(dragPlane, pt)) {
+    selectedWindow.position.x = THREE.MathUtils.lerp(selectedWindow.position.x, pt.x, 0.4);
+    selectedWindow.position.y = THREE.MathUtils.lerp(selectedWindow.position.y, pt.y, 0.4);
+  }
+});
+
+window.addEventListener('mouseup',   () => selectedWindow = null);
+window.addEventListener('mouseleave',() => selectedWindow = null);
+
+// ─── ANIMATION LOOP ────────────────────────────────
+function animate() {
+  requestAnimationFrame(animate);
+
+  updateHeadTracking();
+
+  smoothHeadX += (headX - smoothHeadX) * SMOOTHING;
+  smoothHeadY += (headY - smoothHeadY) * SMOOTHING;
+
+  let targetZoom = (faceScale - 0.25) * ZOOM_STRENGTH;
+  smoothZoom += (targetZoom - smoothZoom) * 0.08;
+
+  // Combine face + mouse (face priority, mouse subtle)
+  const finalX = (smoothHeadX - 0.5) * 0.7 + mx * 0.3;
+  const finalY = (smoothHeadY - 0.5) * 0.7 + my * 0.3;
+
+  camera.position.x = finalX * SENSITIVITY_X;
+  camera.position.y = -finalY * SENSITIVITY_Y + 1.2;
+  camera.lookAt(0, 0.4, -6);
+
+  // Dynamic depth & scale
+  scene.children.forEach(child => {
+    if (!child.isWindow) return;
+    const factor = child.userData.isMain ? 1.6 : 0.5;
+    child.position.z = child.userData.initialZ + smoothZoom * factor;
+    if (child.userData.isMain) {
+      child.scale.setScalar(1 + smoothZoom * 0.045);
     }
-    </script>
+  });
 
-    <script type="module">
-        import * as THREE from 'three';
-        import { FaceDetector, FilesetResolver } from "@mediapipe/tasks-vision";
+  // Gentle particle drift
+  particles.rotation.y += 0.0004;
 
-        // --- CONFIGURATION ---
-        const SENSITIVITY_X = 22; 
-        const SENSITIVITY_Y = 14;
-        const SMOOTHING = 0.12;
-        const ZOOM_STRENGTH = 15; // How much the middle screen moves toward you
+  renderer.render(scene, camera);
+}
 
-        let faceDetector, lastVideoTime = -1;
-        let headX = 0.5, headY = 0.5, faceScale = 0.2;
-        let smoothHeadX = 0.5, smoothHeadY = 0.5, smoothZoom = 0;
+window.addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
 
-        const video = document.getElementById('webcam');
-        const statusText = document.getElementById('status-text');
-
-        // --- 1. THREE.JS SCENE SETUP ---
-        const scene = new THREE.Scene();
-        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
-        const renderer = new THREE.WebGLRenderer({ antialias: true });
-        renderer.setSize(window.innerWidth, window.innerHeight);
-        renderer.setPixelRatio(window.devicePixelRatio);
-        document.body.appendChild(renderer.domElement);
-
-        // Environment
-        const room = new THREE.Mesh(
-            new THREE.BoxGeometry(40, 30, 30),
-            new THREE.MeshStandardMaterial({ color: 0x050505, side: THREE.BackSide })
-        );
-        scene.add(room);
-
-        const grid = new THREE.GridHelper(60, 30, 0x00ffaa, 0x222222);
-        grid.position.y = -8;
-        scene.add(grid);
-
-        const loader = new THREE.TextureLoader();
-        
-        // Window Creation Logic
-        function createAppWindow(x, y, z, imgUrl, isMiddle = false) {
-            const texture = loader.load(imgUrl);
-            const geom = new THREE.BoxGeometry(7, 4, 0.1); // Fixed 16:9-ish proportions
-            const mat = new THREE.MeshPhysicalMaterial({ 
-                map: texture,
-                transparent: true, 
-                opacity: 0.9,
-                transmission: 0.2, 
-                roughness: 0.1,
-                metalness: 0.2,
-                clearcoat: 1.0,
-                emissive: 0xffffff,
-                emissiveIntensity: 0.1
-            });
-            const mesh = new THREE.Mesh(geom, mat);
-            mesh.position.set(x, y, z);
-            mesh.isAppWindow = true;
-            mesh.isMiddle = isMiddle;
-            mesh.userData.initialZ = z;
-            scene.add(mesh);
-            return mesh;
-        }
-
-        // Add the 3 Main Screens
-        createAppWindow(-8, 1, -6, 'https://threejs.org/examples/textures/758px-Canestra_di_frutta_(Caravaggio).jpg'); 
-        createAppWindow(0, 0, -3, 'https://threejs.org/examples/textures/uv_grid_opengl.jpg', true); // Middle
-        createAppWindow(8, 1, -6, 'https://threejs.org/examples/textures/colors.png');
-
-        // Lighting - Balanced for Glass
-        const pointLight = new THREE.PointLight(0xffffff, 800);
-        pointLight.position.set(0, 10, 5);
-        scene.add(pointLight);
-        scene.add(new THREE.AmbientLight(0xffffff, 0.6));
-
-        camera.position.z = 10;
-
-        // --- 2. AI TRACKING ---
-        async function setupCamera() {
-            const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 } });
-            video.srcObject = stream;
-            return new Promise(resolve => video.onloadedmetadata = () => resolve(video));
-        }
-
-        async function initFaceDetection() {
-            try {
-                const vision = await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.17/wasm");
-                faceDetector = await FaceDetector.createFromOptions(vision, {
-                    baseOptions: {
-                        modelAssetPath: `https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/1/blaze_face_short_range.tflite`,
-                        delegate: "GPU"
-                    },
-                    runningMode: "VIDEO"
-                });
-                statusText.innerText = "Hologram Linked ✅";
-            } catch (e) {
-                statusText.innerText = "AI Offline";
-            }
-        }
-
-        function updateTracking() {
-            if (!faceDetector || video.readyState !== 4) return;
-            if (video.currentTime !== lastVideoTime) {
-                lastVideoTime = video.currentTime;
-                const result = faceDetector.detectForVideo(video, performance.now());
-                if (result.detections.length > 0) {
-                    const d = result.detections[0];
-                    headX = 1 - d.keypoints[2].x; 
-                    headY = d.keypoints[2].y;
-                    faceScale = d.boundingBox.width; // Tracking distance
-                }
-            }
-        }
-
-        // --- 3. ANIMATION & ZOOM ---
-        function animate() {
-            requestAnimationFrame(animate);
-            updateTracking();
-
-            smoothHeadX += (headX - smoothHeadX) * SMOOTHING;
-            smoothHeadY += (headY - smoothHeadY) * SMOOTHING;
-            
-            // Normalize Zoom (Distance from camera)
-            let targetZoom = (faceScale - 0.25) * ZOOM_STRENGTH; 
-            smoothZoom += (targetZoom - smoothZoom) * 0.1;
-
-            camera.position.x = (smoothHeadX - 0.5) * SENSITIVITY_X;
-            camera.position.y = -(smoothHeadY - 0.5) * SENSITIVITY_Y;
-            camera.lookAt(0, 0, -5);
-
-            // Apply Z-Axis behavior
-            scene.children.forEach(child => {
-                if (child.isAppWindow) {
-                    if (child.isMiddle) {
-                        // Middle screen pops out significantly
-                        child.position.z = child.userData.initialZ + (smoothZoom * 1.5);
-                        child.scale.setScalar(1 + (smoothZoom * 0.05)); // Subtle scale up as it approaches
-                    } else {
-                        // Side screens have slight parallax depth
-                        child.position.z = child.userData.initialZ + (smoothZoom * 0.4);
-                    }
-                }
-            });
-
-            renderer.render(scene, camera);
-        }
-
-        window.addEventListener('resize', () => {
-            camera.aspect = window.innerWidth / window.innerHeight;
-            camera.updateProjectionMatrix();
-            renderer.setSize(window.innerWidth, window.innerHeight);
-        });
-
-        setupCamera().then(() => initFaceDetection().then(animate));
-    </script>
+setupCamera().then(() => {
+  initFaceDetector().then(animate);
+});
+</script>
 </body>
 </html>

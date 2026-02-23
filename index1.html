@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>3D Holographic OS v1.1</title>
+    <style>
+        body { margin: 0; overflow: hidden; background: #000; color: white; font-family: 'Segoe UI', sans-serif; }
+        #webcam { position: absolute; width: 160px; height: 120px; bottom: 20px; right: 20px; border-radius: 12px; border: 2px solid rgba(255,255,255,0.2); transform: scaleX(-1); background: #222; z-index: 10; }
+        #ui-overlay { position: absolute; top: 30px; left: 30px; pointer-events: none; text-shadow: 0 2px 10px rgba(0,0,0,0.8); z-index: 10; }
+        .status { color: #00ffaa; font-weight: bold; }
+    </style>
+</head>
+<body>
+    <div id="ui-overlay">
+        <h1>Holographic OS v1.1</h1>
+        <p>Status: <span id="status-text" class="status">Initializing AI...</span></p>
+    </div>
+    <video id="webcam" autoplay playsinline></video>
+
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+            "@mediapipe/tasks-vision": "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.17/vision_bundle.mjs"
+        }
+    }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { FaceDetector, FilesetResolver } from "@mediapipe/tasks-vision";
+
+        // --- CONFIGURATION ---
+        const SENSITIVITY_X = 22; 
+        const SENSITIVITY_Y = 14;
+        const SMOOTHING = 0.12;
+        const ZOOM_STRENGTH = 15; // How much the middle screen moves toward you
+
+        let faceDetector, lastVideoTime = -1;
+        let headX = 0.5, headY = 0.5, faceScale = 0.2;
+        let smoothHeadX = 0.5, smoothHeadY = 0.5, smoothZoom = 0;
+
+        const video = document.getElementById('webcam');
+        const statusText = document.getElementById('status-text');
+
+        // --- 1. THREE.JS SCENE SETUP ---
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(window.devicePixelRatio);
+        document.body.appendChild(renderer.domElement);
+
+        // Environment
+        const room = new THREE.Mesh(
+            new THREE.BoxGeometry(40, 30, 30),
+            new THREE.MeshStandardMaterial({ color: 0x050505, side: THREE.BackSide })
+        );
+        scene.add(room);
+
+        const grid = new THREE.GridHelper(60, 30, 0x00ffaa, 0x222222);
+        grid.position.y = -8;
+        scene.add(grid);
+
+        const loader = new THREE.TextureLoader();
+        
+        // Window Creation Logic
+        function createAppWindow(x, y, z, imgUrl, isMiddle = false) {
+            const texture = loader.load(imgUrl);
+            const geom = new THREE.BoxGeometry(7, 4, 0.1); // Fixed 16:9-ish proportions
+            const mat = new THREE.MeshPhysicalMaterial({ 
+                map: texture,
+                transparent: true, 
+                opacity: 0.9,
+                transmission: 0.2, 
+                roughness: 0.1,
+                metalness: 0.2,
+                clearcoat: 1.0,
+                emissive: 0xffffff,
+                emissiveIntensity: 0.1
+            });
+            const mesh = new THREE.Mesh(geom, mat);
+            mesh.position.set(x, y, z);
+            mesh.isAppWindow = true;
+            mesh.isMiddle = isMiddle;
+            mesh.userData.initialZ = z;
+            scene.add(mesh);
+            return mesh;
+        }
+
+        // Add the 3 Main Screens
+        createAppWindow(-8, 1, -6, 'https://threejs.org/examples/textures/758px-Canestra_di_frutta_(Caravaggio).jpg'); 
+        createAppWindow(0, 0, -3, 'https://threejs.org/examples/textures/uv_grid_opengl.jpg', true); // Middle
+        createAppWindow(8, 1, -6, 'https://threejs.org/examples/textures/colors.png');
+
+        // Lighting - Balanced for Glass
+        const pointLight = new THREE.PointLight(0xffffff, 800);
+        pointLight.position.set(0, 10, 5);
+        scene.add(pointLight);
+        scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+
+        camera.position.z = 10;
+
+        // --- 2. AI TRACKING ---
+        async function setupCamera() {
+            const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 } });
+            video.srcObject = stream;
+            return new Promise(resolve => video.onloadedmetadata = () => resolve(video));
+        }
+
+        async function initFaceDetection() {
+            try {
+                const vision = await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.17/wasm");
+                faceDetector = await FaceDetector.createFromOptions(vision, {
+                    baseOptions: {
+                        modelAssetPath: `https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/1/blaze_face_short_range.tflite`,
+                        delegate: "GPU"
+                    },
+                    runningMode: "VIDEO"
+                });
+                statusText.innerText = "Hologram Linked ✅";
+            } catch (e) {
+                statusText.innerText = "AI Offline";
+            }
+        }
+
+        function updateTracking() {
+            if (!faceDetector || video.readyState !== 4) return;
+            if (video.currentTime !== lastVideoTime) {
+                lastVideoTime = video.currentTime;
+                const result = faceDetector.detectForVideo(video, performance.now());
+                if (result.detections.length > 0) {
+                    const d = result.detections[0];
+                    headX = 1 - d.keypoints[2].x; 
+                    headY = d.keypoints[2].y;
+                    faceScale = d.boundingBox.width; // Tracking distance
+                }
+            }
+        }
+
+        // --- 3. ANIMATION & ZOOM ---
+        function animate() {
+            requestAnimationFrame(animate);
+            updateTracking();
+
+            smoothHeadX += (headX - smoothHeadX) * SMOOTHING;
+            smoothHeadY += (headY - smoothHeadY) * SMOOTHING;
+            
+            // Normalize Zoom (Distance from camera)
+            let targetZoom = (faceScale - 0.25) * ZOOM_STRENGTH; 
+            smoothZoom += (targetZoom - smoothZoom) * 0.1;
+
+            camera.position.x = (smoothHeadX - 0.5) * SENSITIVITY_X;
+            camera.position.y = -(smoothHeadY - 0.5) * SENSITIVITY_Y;
+            camera.lookAt(0, 0, -5);
+
+            // Apply Z-Axis behavior
+            scene.children.forEach(child => {
+                if (child.isAppWindow) {
+                    if (child.isMiddle) {
+                        // Middle screen pops out significantly
+                        child.position.z = child.userData.initialZ + (smoothZoom * 1.5);
+                        child.scale.setScalar(1 + (smoothZoom * 0.05)); // Subtle scale up as it approaches
+                    } else {
+                        // Side screens have slight parallax depth
+                        child.position.z = child.userData.initialZ + (smoothZoom * 0.4);
+                    }
+                }
+            });
+
+            renderer.render(scene, camera);
+        }
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        setupCamera().then(() => initFaceDetection().then(animate));
+    </script>
+</body>
+</html>
